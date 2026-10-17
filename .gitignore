@@ -1,5 +1,33 @@
-venv/
-__pycache__/
+
+
 *.pyc
 .env
 .streamlit/secrets.toml
+
+
+# Python cache
+__pycache__/
+*.py[cod]
+.DS_Store
+
+# Virtual Environments
+venv/
+env/
+.venv/
+
+# Large Model Weights (Keep code lightweight)
+*.pth
+*.pt
+*.keras
+*.h5
+*.pkl
+
+# Datasets & Temporary Test Images
+data/
+data/autism_test/
+
+# Streamlit Cache
+.streamlit/
+
+
+.vscode/

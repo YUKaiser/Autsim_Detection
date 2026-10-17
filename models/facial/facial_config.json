@@ -1,0 +1,10 @@
+{
+    "optimal_threshold": 0.73,
+    "optimal_temperature": 1.5,
+    "ood_threshold": 42.0,
+    "input_dim": 518,
+    "hidden_dim": 32,
+    "num_classes": 2,
+    "autism_classes": ["autistic", "non_autistic"],
+    "emotion_classes": ["angry", "disgusted", "fearful", "happy", "neutral", "sad"]
+}

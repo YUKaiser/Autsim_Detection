@@ -1,7 +1,8 @@
 import os
+import random
 import textwrap
 import pickle
-
+from PIL import Image
 import numpy as np
 
 import streamlit as st
@@ -1819,50 +1820,154 @@ def load_pkl(path):
 
 
 # ============================================================
+# ============================================================
 # LOAD KERAS MODEL
 # ============================================================
 
 @st.cache_resource
 def load_keras_model(path):
-
     try:
-
         from tensorflow import keras
-
-        return keras.models.load_model(
-            path,
-            compile=False
-        )
-
+        return keras.models.load_model(path, compile=False)
     except Exception:
         return None
+
+
+# ============================================================
+# LOAD PYTORCH FACIAL PIPELINE
+# ============================================================
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torchvision import transforms, models
+import json
+
+class FusionClassifier(nn.Module):
+    def __init__(self, input_dim=518, hidden_dim=32, num_classes=2):
+        super().__init__()
+        self.fc1 = nn.Linear(input_dim, hidden_dim)
+        self.bn1 = nn.BatchNorm1d(hidden_dim)
+        self.relu = nn.ReLU()
+        self.dropout1 = nn.Dropout(0.6)
+        self.fc2 = nn.Linear(hidden_dim, num_classes)
+
+    def forward(self, x):
+        x = self.fc1(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+        x = self.dropout1(x)
+        return self.fc2(x)
+
+@st.cache_resource
+def load_pytorch_facial_pipeline():
+    try:
+        # Check all possible relative locations for models/facial
+        if os.path.exists("models/facial"):
+            model_dir = "models/facial"
+        elif os.path.exists("../models/facial"):
+            model_dir = "../models/facial"
+        else:
+            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            model_dir = os.path.join(base_dir, "models", "facial")
+
+        if not os.path.exists(model_dir):
+            raise FileNotFoundError(f"Directory not found: {os.path.abspath(model_dir)}")
+
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        config_path = os.path.join(model_dir, "facial_config.json")
+        if not os.path.exists(config_path):
+            raise FileNotFoundError(f"Missing config at: {config_path}")
+
+        with open(config_path, "r") as f:
+            config = json.load(f)
+
+        transform = transforms.Compose([
+            transforms.Resize((224, 224)),
+            transforms.Grayscale(num_output_channels=3),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
+
+        ood_path = os.path.join(model_dir, "ood_stats.pt")
+        if not os.path.exists(ood_path):
+            raise FileNotFoundError(f"Missing ood_stats at: {ood_path}")
+        ood_data = torch.load(ood_path, map_location=device)
+        train_mean = ood_data["mean"].to(device)
+        train_std = ood_data["std"].to(device)
+
+        feat_path = os.path.join(model_dir, "best_autism_resnet18.pth")
+        if not os.path.exists(feat_path):
+            raise FileNotFoundError(f"Missing weights at: {feat_path}")
+        feat_extractor = models.resnet18(weights=None)
+        feat_extractor.fc = nn.Identity()
+        feat_extractor.load_state_dict(
+            torch.load(feat_path, map_location=device),
+            strict=False
+        )
+        feat_extractor = feat_extractor.to(device).eval()
+
+        emo_path = os.path.join(model_dir, "best_emotion_resnet18_final.pth")
+        if not os.path.exists(emo_path):
+            raise FileNotFoundError(f"Missing weights at: {emo_path}")
+        emotion_model = models.resnet18(weights=None)
+        emotion_model.fc = nn.Linear(emotion_model.fc.in_features, len(config["emotion_classes"]))
+        emotion_model.load_state_dict(
+            torch.load(emo_path, map_location=device)
+        )
+        emotion_model = emotion_model.to(device).eval()
+
+        fusion_path = os.path.join(model_dir, "best_fusion_model_v2.pth")
+        if not os.path.exists(fusion_path):
+            raise FileNotFoundError(f"Missing weights at: {fusion_path}")
+        fusion = FusionClassifier(
+            input_dim=512 + len(config["emotion_classes"]),
+            hidden_dim=config["hidden_dim"],
+            num_classes=config["num_classes"]
+        ).to(device)
+        fusion.load_state_dict(
+            torch.load(fusion_path, map_location=device)
+        )
+        fusion.eval()
+
+        try:
+            import cv2.data
+            cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+        except Exception:
+            cascade = None
+
+        return {
+            "device": device,
+            "config": config,
+            "transform": transform,
+            "train_mean": train_mean,
+            "train_std": train_std,
+            "train_mean_vec": train_mean,
+            "train_std_vec": train_std,
+            "feat_extractor": feat_extractor,
+            "feature_extractor": feat_extractor,
+            "emotion_model": emotion_model,
+            "fusion": fusion,
+            "fusion_model": fusion,
+            "cascade": cascade
+        }
+    except Exception as e:
+        import traceback
+        st.session_state["facial_load_error"] = f"{e}\n\n{traceback.format_exc()}"
+        return None
+
 
 
 # ============================================================
 # LOAD MODELS
 # ============================================================
 
-behavior = load_pkl(
-    os.path.join(
-        BASE,
-        "behavioral_model.pkl"
-    )
-)
+behavior = load_pkl(os.path.join(BASE, "behavioral_model.pkl"))
 
+# Initialize PyTorch Facial Pipeline
+face = load_pytorch_facial_pipeline()
 
-face = load_keras_model(
-    os.path.join(
-        BASE,
-        "autism_facial_model.keras"
-    )
-)
-
-mri_image_model = load_keras_model(
-    os.path.join(
-        BASE,
-        "mri_image_model.keras"
-    )
-)
+mri_image_model = load_keras_model(os.path.join(BASE, "mri_image_model.keras"))
 
 
 # ============================================================
@@ -2409,97 +2514,348 @@ elif page == "🧬 MRI Analysis":
                     """))
                 except Exception as e:
                     st.error(f"MRI model error: {e}")
-
 # ============================================================
-# FACE ANALYSIS
+# FACE ANALYSIS (Exact Mirror of Colab Interactive Dashboard)
 # ============================================================
 
 elif page == "📷 Face Analysis":
 
-    st.html(
-        textwrap.dedent("""
-        <div class="hero">
-            <div class="hero-small">HOME › FACE ANALYSIS</div>
-            <div class="hero-title">Facial Image Analysis</div>
-            <div class="hero-description">
-                Upload a facial image for AI-assisted classification.
+    st.markdown("""
+    <div style="background:#1e2430; border:1px solid #2e384d; border-radius:12px; padding:24px; margin-bottom:20px;">
+        <div style="font-size:20px; font-weight:700; color:#60a5fa; margin-bottom:6px;">🩺 Pediatric Autism Screening System</div>
+        <div style="font-size:13px; color:#94a3b8;">Multimodal Face Morphology & Expression Analysis Submodule</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Colab source_toggle
+    input_source = st.radio(
+        "Input Source:",
+        ["📸 Live Camera", "📁 Test Dataset", "⬆️ Local Upload"],
+        index=None,
+        horizontal=True
+    )
+
+    if input_source is None:
+        st.info("👈 Please select an Input Source above to begin screening.")
+        st.stop()
+
+    selected_image = None
+    is_webcam = False
+    ground_truth = None
+    user_age = None
+
+    # 1. Webcam Mode
+    # --------------------------------------------------------
+    # SOURCE 1: MODERN LIVE CAMERA
+    # --------------------------------------------------------
+    if input_source == "📸 Live Camera":
+        is_webcam = True
+        
+        col_age, col_hint = st.columns([1, 2])
+        with col_age:
+            user_age = st.number_input("Age (Years):", min_value=1, max_value=99, value=7, step=1)
+        with col_hint:
+            st.caption("ℹ️ *Pediatric evaluation target range: 2–16 years.*")
+
+        st.markdown("""
+        <style>
+            [data-testid="stCameraInput"] {
+                border-radius: 16px;
+                border: 2px solid #3b82f633;
+                background: linear-gradient(145deg, #131b2e, #1a243b);
+                padding: 16px;
+                box-shadow: 0 8px 32px rgba(0,0,0,0.37);
+            }
+            [data-testid="stCameraInput"] button {
+                background: linear-gradient(135deg, #a855f7, #6366f1) !important;
+                color: #fff !important;
+                font-weight: 600 !important;
+                border: none !important;
+                border-radius: 10px !important;
+                transition: transform 0.2s ease;
+            }
+            [data-testid="stCameraInput"] button:hover {
+                transform: scale(1.02);
+            }
+        </style>
+        """, unsafe_allow_html=True)
+
+        cam_picture = st.camera_input("Center subject in frame and capture portrait")
+
+        if cam_picture is not None:
+            selected_image = Image.open(cam_picture).convert("RGB")
+
+    # --------------------------------------------------------
+    # SOURCE 2: TEST DATASET SAMPLES (Robust & Reversible)
+    # --------------------------------------------------------
+    elif input_source == "📁 Test Dataset":
+        import random  # Guaranteed local import to prevent NameError
+
+        is_webcam = False
+        user_age = None
+
+        st.info("ℹ️ *Age auto-validated: Pre-screened pediatric research cohort (ages 2–11).*")
+
+        # Track selected sample in session state
+        if "dataset_sample_num" not in st.session_state:
+            st.session_state.dataset_sample_num = None
+
+        # Callbacks for instant, stable updates
+        def set_random_autistic():
+            st.session_state.dataset_sample_num = random.randint(0, 99)
+
+        def set_random_typical():
+            st.session_state.dataset_sample_num = random.randint(100, 199)
+
+        def clear_selection():
+            st.session_state.dataset_sample_num = None
+
+        # Clean 4-column control bar: [Input Box | Random Autistic | Random Typical | Clear]
+        col_in, col_a, col_t, col_clr = st.columns([1.6, 1.2, 1.2, 0.8], vertical_alignment="bottom")
+
+        with col_in:
+            dataset_idx = st.number_input(
+                "Sample ID (0–199):",
+                min_value=0,
+                max_value=199,
+                value=st.session_state.dataset_sample_num,
+                placeholder="Type 0 to 199...",
+                step=1,
+                help="Samples 0–99: Autistic Cohort | Samples 100–199: Typical Cohort"
+            )
+            # Sync manually typed input with session state
+            if dataset_idx != st.session_state.dataset_sample_num:
+                st.session_state.dataset_sample_num = dataset_idx
+
+        with col_a:
+            st.button("🎲 Random ASD (0–99)", on_click=set_random_autistic, use_container_width=True)
+
+        with col_t:
+            st.button("🎲 Random Typical (100–199)", on_click=set_random_typical, use_container_width=True)
+
+        with col_clr:
+            st.button("✕ Clear", on_click=clear_selection, use_container_width=True, help="Clear selection and hide preview")
+
+        # Gatekeeper: Show friendly placeholder and stop execution until a number is chosen
+        if st.session_state.dataset_sample_num is None:
+            st.markdown("""
+            <div style="text-align: center; padding: 36px 20px; border: 1.5px dashed #334155; border-radius: 12px; margin-top: 18px; background: #0f172a55;">
+                <div style="font-size: 26px; margin-bottom: 6px;">📂</div>
+                <div style="font-weight: 600; color: #94a3b8; font-size: 15px;">No Sample Selected</div>
+                <div style="font-size: 13px; color: #64748b; margin-top: 4px;">
+                    Enter a number between 0 and 199 or click one of the random cohort buttons above to inspect.
+                </div>
             </div>
-        </div>
-        """)
-    )
+            """, unsafe_allow_html=True)
+            st.stop()
 
-    st.markdown(
-        "<div class='camera-heading'>Live Camera</div>",
-        unsafe_allow_html=True
-    )
-    st.markdown(
-        "<div class='camera-caption'>Allow camera access, position the face clearly, then capture an image.</div>",
-        unsafe_allow_html=True
-    )
+        active_idx = int(st.session_state.dataset_sample_num)
 
-    ctx = webrtc_streamer(
-        key="face-camera",
-        video_processor_factory=FaceCameraProcessor,
-        media_stream_constraints={"video": True, "audio": False},
-        async_processing=True,
-    )
-
-    st.markdown("<div style='height:40px'></div>", unsafe_allow_html=True)
-
-    if st.button("📸 Capture Image", use_container_width=True):
-        if ctx.video_processor is not None and ctx.video_processor.latest_frame is not None:
-            frame_bgr = ctx.video_processor.latest_frame.copy()
-            frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-            st.session_state.captured_face = frame_rgb
-            st.session_state.face_camera_error = None
-            st.rerun()
+        # Cohort routing & label badges
+        if active_idx < 100:
+            target_cohort = "autistic"
+            ground_truth = "autistic"
+            rel_idx = active_idx
+            badge_html = "<span style='background:#7f1d1d; color:#fca5a5; padding:3px 10px; border-radius:12px; font-weight:600; font-size:12px;'>Autistic Cohort (0–99)</span>"
         else:
-            st.session_state.face_camera_error = "No camera frame is available yet. Start the camera and try again."
+            target_cohort = "non_autistic"
+            ground_truth = "non_autistic"
+            rel_idx = active_idx - 100
+            badge_html = "<span style='background:#14532d; color:#86efac; padding:3px 10px; border-radius:12px; font-weight:600; font-size:12px;'>Typical Cohort (100–199)</span>"
 
-    if st.session_state.get("face_camera_error"):
-        st.warning(st.session_state.face_camera_error)
+        # Resolve directory
+        test_dir = "data/autism_test"
+        if not os.path.exists(test_dir):
+            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            test_dir = os.path.join(base_dir, "data", "autism_test")
 
-    captured_face = st.session_state.get("captured_face")
-
-    if captured_face is not None:
-        from PIL import Image
-        face_image = Image.fromarray(captured_face).convert("RGB")
-        st.markdown("### Facial Image Preview")
-        left, center, right = st.columns([1, 2, 1])
-        with center:
-            st.image(face_image, caption="Captured Facial Image", use_container_width=True)
-
-        if st.button("🧠 Analyze Captured Face →", use_container_width=True):
-            if face is None:
-                st.error("autism_facial_model.keras could not be loaded.")
+        cohort_path = os.path.join(test_dir, target_cohort)
+        if os.path.exists(cohort_path):
+            sample_files = sorted([f for f in os.listdir(cohort_path) if f.lower().endswith(('.png', '.jpg', '.jpeg'))])
+            if sample_files:
+                img_path = os.path.join(cohort_path, sample_files[rel_idx % len(sample_files)])
+                selected_image = Image.open(img_path).convert("RGB")
+                st.markdown(
+                    f"<div style='margin:12px 0 8px 0;'>Active Sample: <b>#{active_idx}</b> &nbsp;|&nbsp; {badge_html} &nbsp;|&nbsp; <code style='font-size:12px;'>{sample_files[rel_idx % len(sample_files)]}</code></div>",
+                    unsafe_allow_html=True
+                )
             else:
-                try:
-                    shape = face.input_shape
-                    if isinstance(shape, list): shape = shape[0]
-                    height = int(shape[1] if shape[1] else 224)
-                    width = int(shape[2] if shape[2] else 224)
-                    resized = face_image.resize((width, height))
-                    X_face = np.expand_dims(np.asarray(resized, dtype=np.float32) / 255.0, axis=0)
-                    probability = float(np.ravel(face.predict(X_face, verbose=0))[0])
-                    result = int(probability >= 0.5)
-                    st.session_state.face = result
-                    confidence = probability * 100 if result else (1 - probability) * 100
-                    st.session_state.fs = int(round(confidence))
-                    st.html(textwrap.dedent(f"""
-                    <div class="result">
-                        <div class="hero-small">FACIAL ANALYSIS RESULT</div>
-                        <h2>📷 {"Possible ASD Pattern" if result else "Lower ASD Pattern"}</h2>
-                        <p>Confidence: <strong>{confidence:.2f}%</strong></p>
-                    </div>
-                    """))
-                except Exception as e:
-                    st.error(f"Facial model error: {e}")
+                st.warning(f"No image files found in `{cohort_path}`.")
+        else:
+            st.warning(f"Directory `{cohort_path}` not found. Ensure `data/autism_test` is populated.")
+    # 3. Local Upload Mode
+    elif input_source == "⬆️ Local Upload":
+        is_webcam = True
+        user_age = st.number_input("Age (Years):", min_value=1, max_value=99, value=7, step=1)
+        up_file = st.file_uploader("Select a frontal portrait image (.jpg, .png):", type=["jpg", "jpeg", "png"])
+        if up_file is not None:
+            selected_image = Image.open(up_file).convert("RGB")
 
-        if st.button("🔄 Capture Again", use_container_width=True):
-            st.session_state.captured_face = None
-            st.session_state.face_camera_error = None
-            st.rerun()
+    # ========================================================
+    # INFERENCE (predict_autism_final & print_screening_report)
+    # ========================================================
+    if selected_image is not None:
+        st.markdown("---")
+        col_img1, col_img2 = st.columns(2)
 
+        with col_img1:
+            st.markdown("**Original Image**")
+            st.image(selected_image, use_container_width=True)
+
+        img_np = np.array(selected_image)
+        h_img, w_img = img_np.shape[:2]
+        face_img = selected_image
+
+        # Face crop logic matching Colab's is_webcam branch
+        if is_webcam:
+            crop_success = False
+            try:
+                if hasattr(cv2, "CascadeClassifier") and hasattr(cv2, "data"):
+                    casc = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+                    gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
+                    faces = casc.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=4, minSize=(70, 70))
+                    if len(faces) > 0:
+                        x, y, w, h = max(faces, key=lambda f: f[2] * f[3])
+                        pad_x, pad_y = int(0.15 * w), int(0.15 * h)
+                        x0 = max(0, x - pad_x)
+                        y0 = max(0, y - pad_y)
+                        x1 = min(w_img, x + w + pad_x)
+                        y1 = min(h_img, y + h + pad_y)
+                        face_img = Image.fromarray(img_np[y0:y1, x0:x1])
+                        crop_success = True
+            except Exception:
+                pass
+
+            if not crop_success:
+                # Desktop webcam angle fallback centered on face height
+                crop_h = int(h_img * 0.65)
+                crop_w = int(crop_h * 0.90)
+                cx, cy = w_img // 2, int(h_img * 0.64)
+                x0 = max(0, cx - crop_w // 2)
+                y0 = max(0, cy - crop_h // 2)
+                x1 = min(w_img, x0 + crop_w)
+                y1 = min(h_img, y0 + crop_h)
+                face_img = Image.fromarray(img_np[y0:y1, x0:x1])
+
+        with col_img2:
+            st.markdown("**Face Isolated for Model**")
+            st.image(face_img, use_container_width=True)
+
+        if st.button("▶ Run Screening Analysis", type="primary", use_container_width=True):
+            if face is None:
+                err = st.session_state.get("facial_load_error", "Model weights failed to load.")
+                st.error("⚠️ Model pipeline could not be loaded:")
+                st.code(err)
+            else:
+                tensor = face["transform"](face_img).unsqueeze(0).to(face["device"])
+
+                with torch.no_grad():
+                    # 1. Extract facial expressions
+                    raw_emo = F.softmax(face["emotion_model"](tensor), dim=1).cpu().numpy()[0]
+                    ranked_emo = sorted(zip(face["config"]["emotion_classes"], raw_emo), key=lambda x: x[1], reverse=True)
+                    top_2_emo = [(emo, f"{prob * 100:.1f}%") for emo, prob in ranked_emo[:2]]
+
+                    # 2. Demographic & OOD verification (check_ood_distance)
+                    img_feats = face["feature_extractor"](tensor)
+                    z_diff = (img_feats[0] - face["train_mean_vec"]) / face["train_std_vec"]
+                    dist = torch.norm(z_diff).item()
+
+                    # Use 25.0 as the active safeguard cutoff (your capture measured ~27.27)
+                    ood_threshold = float(face["config"].get("ood_threshold", 25.0))
+                    if ood_threshold > 25.0:
+                        ood_threshold = 25.0
+
+                    decision_threshold = float(face["config"].get("optimal_threshold", 0.73))
+                    temp = float(face["config"].get("optimal_temperature", 1.5))
+
+                    is_ood = dist > ood_threshold
+                    is_adult_age = (user_age is not None and user_age > 16)
+                    is_adult_morphology = (is_webcam and is_ood)
+
+                    # Colab Adult Fallback Branch
+                    if is_adult_age or is_adult_morphology:
+                        reason = (
+                            f"Entered age ({user_age} yrs) exceeds pediatric limits"
+                            if is_adult_age else
+                            f"Facial morphology matches adult cranial proportions (Z: {dist:.1f} > {ood_threshold})"
+                        )
+                        report_box = f"""
+                            ==========================================================
+                                        FACIAL EXPRESSION ANALYSIS (ADULT)            
+                            ==========================================================
+                            • Subject Classification : Adult / Mature Facial Geometry
+                            • Cranial Z-Distance     : {dist:.2f} (Threshold: {ood_threshold:.1f})
+                            • Clinical Screening     : Disabled (Out of Target Scope)
+                            ----------------------------------------------------------
+                            Dominant Facial Expressions (Top 2):
+                              1. {top_2_emo[0][0].capitalize():<10}: {top_2_emo[0][1]}
+                              2. {top_2_emo[1][0].capitalize():<10}: {top_2_emo[1][1]}
+                            ----------------------------------------------------------
+                            Clinical Advisory Note:
+                            • Reason: {reason}.
+                            • This screening model is validated exclusively for pediatric cohorts (ages 2 to 16).
+                            ==========================================================
+                            """
+                        st.code(report_box, language="text")
+
+                        st.session_state.face = None
+                        st.session_state.fs = None
+                        st.session_state.face_result = {
+                            "prediction": "Adult Advisory (Pediatric Screening Disabled)",
+                            "probability": None,
+                            "top_2_expressions": top_2_emo,
+                            "advisory_reason": reason
+                        }
+
+                    # Colab Pediatric Clinical Screening Branch
+                    else:
+                        emo_tensor = torch.tensor(raw_emo, device=face["device"]).unsqueeze(0)
+                        fusion_input = torch.cat([img_feats, emo_tensor], dim=1)
+                        logits = face["fusion_model"](fusion_input)
+                        probs = F.softmax(logits / temp, dim=1).cpu().numpy()[0]
+
+                        prob_autistic = float(probs[0])
+                        prob_non_autistic = float(probs[1])
+
+                        is_autistic = prob_autistic >= decision_threshold
+                        pred_label = 'Features Resemble ASD Patterns' if is_autistic else 'Typical Developmental Patterns'
+                        conf = prob_autistic if is_autistic else prob_non_autistic
+
+                        ground_truth_line = f"• Ground Truth Label    : {ground_truth}\n" if ground_truth else ""
+                        report_box = f"""
+                            ==========================================================
+                                        PEDIATRIC FACIAL SCREENING REPORT             
+                            ==========================================================
+                            {ground_truth_line}• Screening Assessment  : {pred_label}
+                            • Likelihood Score      : {prob_autistic * 100:.2f}%
+                            • Model Confidence      : {conf * 100:.2f}%
+                            • Calibrated Threshold  : {decision_threshold:.3f}
+                            ----------------------------------------------------------
+                            Dominant Facial Expressions (Top 2):
+                              1. {top_2_emo[0][0].capitalize():<10}: {top_2_emo[0][1]}
+                              2. {top_2_emo[1][0].capitalize():<10}: {top_2_emo[1][1]}
+                            ----------------------------------------------------------
+                            Important Note:
+                            • Experimental screening aid only; not a formal medical diagnosis.
+                            ==========================================================
+                            """
+                        st.code(report_box, language="text")
+
+                        st.session_state.face = 1 if is_autistic else 0
+                        st.session_state.fs = int(round(conf * 100))
+                        st.session_state.face_result = {
+                            "prediction": pred_label,
+                            "autism_probability": f"{prob_autistic * 100:.2f}%",
+                            "confidence": f"{conf * 100:.2f}%",
+                            "threshold_used": f"{decision_threshold:.3f}",
+                            "top_2_expressions": top_2_emo
+                        }
+
+        if input_source == "📸 Live Camera":
+            if st.button("🔄 Capture Again", use_container_width=True):
+                st.session_state.pop("colab_img", None)
+                st.session_state.pop("colab_err", None)
+                st.rerun()
 # ============================================================
 # RESULTS
 # ============================================================

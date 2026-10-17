@@ -216,11 +216,15 @@ with st.container(border=True):
 # FACE RESULT
 # =========================================================
 
+# =========================================================
+# FACE RESULT
+# =========================================================
+
 with st.container(border=True):
 
     st.markdown(
         '<div class="result-title">'
-        '🎥 Face / Body Analysis'
+        '👤 Face / Expression Analysis'
         '</div>',
         unsafe_allow_html=True
     )
@@ -228,16 +232,54 @@ with st.container(border=True):
     st.markdown("")
 
     if face_result:
+        if isinstance(face_result, dict):
+            pred = face_result.get("prediction", "Completed")
+            prob = face_result.get("probability", None)
+            expressions = face_result.get("expressions", [])
 
-        st.success(
-            f"Result: {face_result}"
-        )
+            if "YES" in pred:
+                st.warning(f"**Assessment:** {pred}")
+            elif "NO" in pred:
+                st.success(f"**Assessment:** {pred}")
+            else:
+                st.info(f"**Assessment:** {pred}")
 
+            if prob:
+                st.write(f"**Estimated Likelihood:** {prob}")
+
+            if expressions:
+                st.caption(f"Top Affect Detected: **{expressions[0][0].capitalize()}** ({expressions[0][1]*100:.1f}%)")
+        else:
+            st.success(f"Result: {face_result}")
     else:
-
         st.info(
             "Face / Body analysis has not been completed yet."
         )
+
+
+
+# with st.container(border=True):
+
+#     st.markdown(
+#         '<div class="result-title">'
+#         '🎥 Face / Body Analysis'
+#         '</div>',
+#         unsafe_allow_html=True
+#     )
+
+#     st.markdown("")
+
+#     if face_result:
+
+#         st.success(
+#             f"Result: {face_result}"
+#         )
+
+#     else:
+
+#         st.info(
+#             "Face / Body analysis has not been completed yet."
+#         )
 
 
 # =========================================================
