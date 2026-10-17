@@ -16,15 +16,15 @@ env/
 .venv/
 
 # Large Model Weights (Keep code lightweight)
-*.pth
-*.pt
-*.keras
-*.h5
-*.pkl
+# *.pth
+# *.pt
+# *.keras
+# *.h5
+# *.pkl
 
 # Datasets & Temporary Test Images
-data/
-data/autism_test/
+# data/
+# data/autism_test/
 
 # Streamlit Cache
 .streamlit/
